@@ -1,75 +1,91 @@
-# React + TypeScript + Vite
+# BlockFlow Test Task
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+React + TypeScript + Vite застосунок з onboarding-флоу та демонстрацією обробки job через HTTP polling і WebSocket.
 
-Currently, two official plugins are available:
+## Частина 0 — Проєктування
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+### User scenarios
 
-## React Compiler
+**Сценарій 1 — Запуск обробки**
 
-The React Compiler is enabled on this template. See [this documentation](https://react.dev/learn/react-compiler) for more information.
+1. Користувач проходить onboarding (4 кроки): обирає ціль (Screen1), вводить поточну вагу (Screen2) і цільову вагу (Screen3).
+2. На Screen4 («Run a job») з’являються дві кнопки: **Launch via WebSocket** або **Launch via HTTP**.
+3. Після натискання обраної кнопки клієнт надсилає `POST /jobs` з `JobInput` (ціль, поточна та цільова вага) і отримує `jobId`.
+4. UI переходить у стан `running`: для WebSocket показується progress bar з відсотком, для HTTP — indeterminate progress bar.
 
-Note: This will impact Vite dev & build performances.
+**Сценарій 2 — Отримання результату**
 
-## Expanding the ESLint configuration
+1. Після створення job бекенд обробляє його асинхронно.
+2. **WebSocket:** клієнт підписується на `ws://…/ws?jobId=…` і отримує snapshot-и (`status`, `progress`, `result` / `error`) у реальному часі. При `done` або `failed` з’єднання закривається.
+3. **HTTP:** клієнт одразу робить перший `GET /jobs/:id`, далі опитує той самий endpoint кожні 2.5 с, доки статус не стане `done` або `failed`.
+4. Коли job завершено успішно, замість кнопок запуску показується картка **Result** з JSON (`summary`, `computedValue`, `finishedAt`). Кнопка **Reset** повертає onboarding на початок.
 
-If you are developing a production application, we recommend updating the configuration to enable type-aware lint rules:
+### Job processing
 
-```js
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
+1. **Створення:** `JobService.create()` → `POST /jobs` → парсинг `id` / `_id` у `jobId`.
+2. **Обробка на сервері:** job проходить статуси `queued` → `processing` → `done` | `failed` (логіка на бекенді, поза цим репозиторієм).
+3. **Спостереження з клієнта:** два незалежні шляхи — hooks `useWebSocketJob` і `useHttpJob`, кожен викликає той самий `ApiClient.job`, але різним способом отримує оновлення.
 
-      // Remove tseslint.configs.recommended and replace with this
-      tseslint.configs.recommendedTypeChecked,
-      // Alternatively, use this for stricter rules
-      tseslint.configs.strictTypeChecked,
-      // Optionally, add this for stylistic rules
-      tseslint.configs.stylisticTypeChecked,
+### Оновлення статусу
 
-      // Other configs...
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+| Спосіб        | Механізм                                         | Прогрес у UI                                        | Завершення                                   |
+| ------------- | ------------------------------------------------ | --------------------------------------------------- | -------------------------------------------- |
+| **WebSocket** | `connectJobWebSocket` → `JobService.subscribe()` | Determinate (`data.progress`)                       | `status === 'done' \| 'failed'` → disconnect |
+| **HTTP**      | Polling `GET /jobs/:id` кожні 2500 ms            | Indeterminate (немає progress з API в цьому режимі) | Той самий критерій по `status`               |
+
+Обидва шляхи використовують спільний тип `JobSnapshot` і однакову модель фаз у UI: `idle` → `running` → `done` | `error`.
+
+### Діаграма (high-level flow)
+
+```mermaid
+flowchart TD
+    A[Onboarding: wish + weights] --> B[Screen4: Launch job]
+    B --> C{Transport}
+    C -->|WebSocket| D[POST /jobs]
+    C -->|HTTP| D
+    D --> E[jobId]
+    E --> F{Transport}
+    F -->|WS| G[WS /ws?jobId=...]
+    F -->|HTTP| H[GET /jobs/:id poll 2.5s]
+    G --> I{status?}
+    H --> I
+    I -->|processing| J[UI: progress]
+    J --> G
+    J --> H
+    I -->|done| K[JobResult + Reset]
+    I -->|failed| L[Error message]
 ```
 
-You can also install [eslint-plugin-react-x](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-x) and [eslint-plugin-react-dom](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-dom) for React-specific lint rules:
+### Архітектурні рішення
 
-```js
-// eslint.config.js
-import reactX from 'eslint-plugin-react-x'
-import reactDom from 'eslint-plugin-react-dom'
+- **Шари:** UI (screens/components) → hooks (`useHttpJob`, `useWebSocketJob`) → `ApiClient` → `JobService` + `HttpClient` / `job.ws.ts`. Бізнес-логіка транспорту не змішується з розміткою.
+- **Два transport hooks з однаковим контрактом:** `start(input)`, `reset()`, фази `idle | running | done | error` — Screen4 може перемикатися між режимами без дублювання API-викликів у компонентах.
+- **Один сервіс для job:** `JobService` інкапсулює create, getById і subscribe; WebSocket — окремий модуль `job.ws.ts` з функцією disconnect для cleanup.
+- **Конфіг через env:** `VITE_API_URL`, опційно `VITE_WS_URL` (інакше виводиться з HTTP URL).
+- **Onboarding як step factory:** `getOnboardingSteps` збирає кроки декларативно; дані зберігаються в `useOnboarding`, Screen4 лише збирає `JobInput`.
+- **Типізація:** `job.types.ts` — статуси, input/result/snapshot; помилки API через `ApiError`.
 
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-      // Enable lint rules for React
-      reactX.configs['recommended-typescript'],
-      // Enable lint rules for React DOM
-      reactDom.configs.recommended,
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+---
+
+## Запуск
+
+```bash
+pnpm install
+pnpm dev
 ```
+
+Змінні середовища (`.env`):
+
+```env
+VITE_API_URL=https://your-api.example.com
+# VITE_WS_URL=wss://your-api.example.com  # опційно
+```
+
+```bash
+pnpm build
+pnpm preview
+```
+
+## Стек
+
+React 19, TypeScript, Vite, Tailwind CSS 4.
