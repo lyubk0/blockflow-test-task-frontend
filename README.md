@@ -1,5 +1,7 @@
 # BlockFlow Test Task
 
+Прод: https://blockflow-test-taskk.web.app/
+
 **Запуск обробки**
 
 Користувач проходить 4 кроки: обирає ціль, вводить поточну і цільову вагу. На останньому екрані натискає **Launch via WebSocket** або **Launch via HTTP** — застосунок відправляє дані на бекенд і показує, що job уже в роботі (progress bar: з відсотком для WS, без - для HTTP).
